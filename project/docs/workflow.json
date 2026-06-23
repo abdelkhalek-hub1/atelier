@@ -1,0 +1,109 @@
+{
+  "workflow_name": "LangGraph Wikipedia Agentic Workflow",
+  "version": "1.0.0",
+  "description": "An agentic AI workflow that fetches Wikipedia summaries and generates LLM answers, with automatic failure detection and DLQ routing.",
+  "graph": {
+    "entry_point": "wikipedia_node",
+    "nodes": [
+      {
+        "id": "wikipedia_node",
+        "description": "Fetches a Wikipedia summary for the user question via the REST API. Sets wiki_result on success or error on failure.",
+        "inputs": ["question"],
+        "outputs": ["wiki_result", "error"],
+        "can_fail": true
+      },
+      {
+        "id": "llm_node",
+        "description": "Calls the configured LLM (Gemini/OpenAI) to synthesise a final answer from the Wikipedia context. Always produces a non-empty final_answer.",
+        "inputs": ["question", "wiki_result"],
+        "outputs": ["final_answer"],
+        "can_fail": false
+      },
+      {
+        "id": "dlq_node",
+        "description": "Dead Letter Queue handler. POSTs a structured failure payload to the configured DLQ webhook URL and writes a user-facing error message to final_answer.",
+        "inputs": ["question", "error", "execution_id"],
+        "outputs": ["final_answer"],
+        "can_fail": false
+      }
+    ],
+    "edges": [
+      {"from": "START", "to": "wikipedia_node"},
+      {"from": "wikipedia_node", "to": "router_function", "type": "conditional"},
+      {"from": "router_function", "to": "llm_node", "condition": "success"},
+      {"from": "router_function", "to": "dlq_node", "condition": "failure"},
+      {"from": "llm_node", "to": "END"},
+      {"from": "dlq_node", "to": "END"}
+    ],
+    "router": {
+      "id": "router_function",
+      "description": "Inspects AgentState.error and AgentState.wiki_result. Routes to llm_node on success, dlq_node on any failure.",
+      "success_condition": "error is None AND wiki_result is non-empty",
+      "failure_condition": "error is set OR wiki_result is empty/None"
+    }
+  },
+  "state_schema": {
+    "model": "AgentState",
+    "module": "app.state",
+    "fields": [
+      {"name": "execution_id", "type": "str", "description": "UUID4 auto-generated per workflow run for tracing"},
+      {"name": "timestamp", "type": "str", "description": "ISO-8601 UTC timestamp of workflow start"},
+      {"name": "question", "type": "str", "description": "The user input question"},
+      {"name": "wiki_result", "type": "Optional[str]", "description": "Wikipedia extract text; None until wikipedia_node succeeds"},
+      {"name": "error", "type": "Optional[str]", "description": "Error message set by wikipedia_node on failure; None on success"},
+      {"name": "final_answer", "type": "Optional[str]", "description": "Final answer produced by either llm_node or dlq_node"}
+    ]
+  },
+  "observability": {
+    "tracing": {
+      "provider": "LangSmith",
+      "env_var": "LANGCHAIN_API_KEY",
+      "project_env_var": "LANGCHAIN_PROJECT",
+      "enabled_env_var": "LANGCHAIN_TRACING_V2"
+    },
+    "logging": {
+      "format": "JSON",
+      "fields": ["execution_id", "node", "status", "duration_ms", "timestamp", "details"],
+      "module": "app.logger"
+    }
+  },
+  "configuration": {
+    "module": "app.config",
+    "env_vars": [
+      {"name": "WIKIPEDIA_BASE_URL", "default": "https://en.wikipedia.org/api/rest_v1/page/summary", "description": "Wikipedia REST API base URL"},
+      {"name": "WIKIPEDIA_TIMEOUT", "default": "10", "description": "HTTP request timeout in seconds"},
+      {"name": "DLQ_WEBHOOK_URL", "default": "https://httpbin.org/post", "description": "Dead Letter Queue webhook endpoint"},
+      {"name": "DLQ_TIMEOUT", "default": "10", "description": "DLQ webhook POST timeout in seconds"},
+      {"name": "LLM_MODEL", "default": "gemini-1.5-flash", "description": "LLM model identifier"},
+      {"name": "LLM_TEMPERATURE", "default": "0.3", "description": "LLM sampling temperature"},
+      {"name": "GOOGLE_API_KEY", "default": "", "description": "API key for Gemini (Google AI)"},
+      {"name": "OPENAI_API_KEY", "default": "", "description": "API key for OpenAI (alternative LLM)"},
+      {"name": "LANGCHAIN_API_KEY", "default": "", "description": "LangSmith tracing API key"},
+      {"name": "LANGCHAIN_TRACING_V2", "default": "false", "description": "Enable LangSmith tracing"},
+      {"name": "LANGCHAIN_PROJECT", "default": "langgraph-wikipedia-workflow", "description": "LangSmith project name"}
+    ]
+  },
+  "testing": {
+    "framework": "pytest",
+    "test_modules": [
+      {"file": "tests/test_wikipedia.py", "scope": "unit", "covers": "wikipedia_node"},
+      {"file": "tests/test_router.py", "scope": "unit", "covers": "router_function"},
+      {"file": "tests/test_dlq.py", "scope": "unit", "covers": "dlq_node"},
+      {"file": "tests/test_llm.py", "scope": "unit", "covers": "llm_node"},
+      {"file": "tests/test_integration.py", "scope": "integration", "covers": "full workflow via run_workflow()"}
+    ],
+    "mocking_library": "responses",
+    "coverage_target": 90,
+    "ci_report_format": "JUnit XML"
+  },
+  "ci_cd": {
+    "platform": "GitHub Actions",
+    "workflow_file": ".github/workflows/ci.yml",
+    "jobs": [
+      {"name": "Lint & Type Check", "tools": ["flake8", "mypy"]},
+      {"name": "Pytest – Unit & Integration", "python_version": "3.11", "produces": "JUnit XML test report"},
+      {"name": "Generate Workflow Docs", "validates": "docs/workflow.json is well-formed JSON"}
+    ],
+    "triggers": ["push to main/develop/feature/**", "pull_request to main/develop", "workflow_dispatch"]
+  }
+}
