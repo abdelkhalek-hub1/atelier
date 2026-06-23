@@ -61,36 +61,6 @@ _configure_langsmith()
 
 
 # ---------------------------------------------------------------------------
-# Node wrappers: translate AgentState ↔ LangGraph dict interface
-# ---------------------------------------------------------------------------
-# LangGraph's StateGraph works with dicts or TypedDicts by default.
-# We adapt our Pydantic AgentState by converting to/from dict at the
-# graph boundary so the rest of the codebase stays type-safe.
-
-def _wikipedia_node_adapter(state: dict[str, Any]) -> dict[str, Any]:
-    agent_state = AgentState(**state)
-    updated = wikipedia_node(agent_state)
-    return updated.model_dump()
-
-
-def _llm_node_adapter(state: dict[str, Any]) -> dict[str, Any]:
-    agent_state = AgentState(**state)
-    updated = llm_node(agent_state)
-    return updated.model_dump()
-
-
-def _dlq_node_adapter(state: dict[str, Any]) -> dict[str, Any]:
-    agent_state = AgentState(**state)
-    updated = dlq_node(agent_state)
-    return updated.model_dump()
-
-
-def _router_adapter(state: dict[str, Any]) -> str:
-    agent_state = AgentState(**state)
-    return router_function(agent_state)
-
-
-# ---------------------------------------------------------------------------
 # Graph construction
 # ---------------------------------------------------------------------------
 
@@ -103,13 +73,13 @@ def build_graph() -> Any:
     CompiledGraph
         A compiled LangGraph object ready to be invoked.
     """
-    # Use a plain dict as the state schema so LangGraph merges dicts natively
-    graph = StateGraph(dict)  # type: ignore[type-arg]
+    # Use AgentState directly as the state schema
+    graph = StateGraph(AgentState)
 
-    # Register nodes
-    graph.add_node("wikipedia_node", _wikipedia_node_adapter)
-    graph.add_node("llm_node", _llm_node_adapter)
-    graph.add_node("dlq_node", _dlq_node_adapter)
+    # Register nodes directly
+    graph.add_node("wikipedia_node", wikipedia_node)
+    graph.add_node("llm_node", llm_node)
+    graph.add_node("dlq_node", dlq_node)
 
     # Entry point
     graph.add_edge(START, "wikipedia_node")
@@ -117,7 +87,7 @@ def build_graph() -> Any:
     # Conditional routing after wikipedia_node
     graph.add_conditional_edges(
         "wikipedia_node",
-        _router_adapter,
+        router_function,
         {
             SUCCESS_ROUTE: "llm_node",
             FAILURE_ROUTE: "dlq_node",
@@ -167,8 +137,11 @@ def run_workflow(question: str) -> AgentState:
         },
     )
 
-    result_dict: dict[str, Any] = _compiled_graph.invoke(initial_state.model_dump())
-    final_state = AgentState(**result_dict)
+    result = _compiled_graph.invoke(initial_state)
+    if isinstance(result, AgentState):
+        final_state = result
+    else:
+        final_state = AgentState(**result)
 
     logger.info(
         "Workflow completed",

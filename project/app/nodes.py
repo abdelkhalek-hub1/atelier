@@ -20,7 +20,7 @@ from typing import Any
 import requests
 
 from app.config import config
-from app.logger import get_logger, log_node_event, timed_node
+from app.logger import get_logger, log_node_event
 from app.state import AgentState
 
 logger = get_logger("langgraph.nodes")
